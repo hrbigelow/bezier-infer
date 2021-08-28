@@ -17,13 +17,12 @@
 # Finally, the loss is computed as the KL divergence between the two mixtures,
 # and gradient descent on P is performed until convergence
 """
+import sys
 import torch as t
 import numpy as np
 from torch import nn, optim
 from math import factorial as fac
 from PIL import Image
-import sys
-import matplotlib.pyplot as plt
 
 # Uses Bernstein Polynomial Form
 # b_{v,n}(t) := (n-choose-v) t^v (1-t)^(n-v)
@@ -56,51 +55,10 @@ class BezierCurve(nn.Module):
       self.points[:,0] *= self.nx
       self.points[:,1] *= self.ny
 
-  def set_points(self, points):
-    with t.no_grad():
-      self.points[:] = points
-
   def forward(self):
     # T,n 
     curve = self.bernstein @ self.points
     return curve
-
-
-class PrintCurve(nn.Module):
-  def __init__(self, nx, ny):
-    super(PrintCurve, self).__init__()
-    plt.autoscale(False)
-    # plt.style.use('grayscale')
-    self.fig = plt.figure(figsize=(1, 1), dpi=nx, frameon=True)
-    self.ax = self.fig.add_axes([0, 0, 1, 1])
-    self.ax.axis('off')
-    self.ax.set_xlim([0, nx])
-    self.ax.set_ylim([0, ny])
-    self.fig.set_facecolor('black')
-    self.line, = self.ax.plot([], [], color='white', linewidth=2.0)
-
-  def set_curve(self, curve_x, curve_y):
-    self.line.set_xdata(curve_x)
-    self.line.set_ydata(curve_y)
-
-  def render(self):
-    plt.draw()
-
-  def print(self, path):
-    plt.draw()
-    self.fig.savefig(path)
-
-  def get_img_data(self):
-    buf, sz = self.fig.canvas.print_to_buffer()
-    arr = np.frombuffer(buf, dtype=np.uint8, count=sz[0]*sz[1]*4)
-    arr = arr.reshape(sz[0], sz[1], 4)
-    arr = arr[:,:,0]
-    return t.tensor(arr)
-
-  def forward(self, curve):
-    self.set_curve(curve[:,0], curve[:,1])
-    self.render()
-    return self.get_img_data()
 
 
 class Mixture(nn.Module):
@@ -111,16 +69,18 @@ class Mixture(nn.Module):
     self.ny = ny
     self.sigma = sigma
 
-  def forward(self, bezier):
-    """Output the mixture grid from the Bezier points
-    bezier: T,2
-    """
+  def normalize(self, mixture):
+    return mixture / t.sum(mixture)
 
-    T = bezier.shape[0]
-    xp = t.linspace(0, 1, self.nx).unsqueeze(0)
-    yp = t.linspace(0, 1, self.ny).unsqueeze(0)
-    bx = bezier[:,0].unsqueeze(1)
-    by = bezier[:,1].unsqueeze(1)
+  def forward(self, curve):
+    """Output the mixture grid from the Bezier points
+    curve: T,2
+    """
+    T = curve.shape[0]
+    xp = t.linspace(0.5, self.nx - 0.5, self.nx).unsqueeze(0)
+    yp = t.linspace(0.5, self.ny - 0.5, self.ny).unsqueeze(0)
+    bx = curve[:,0].unsqueeze(1)
+    by = curve[:,1].unsqueeze(1)
     rsig = 1.0 / (2.0 * self.sigma ** 2)
     # gx: T,nx   gy: T,ny
     gx = (- rsig * (xp - bx) ** 2).exp()
@@ -128,65 +88,39 @@ class Mixture(nn.Module):
     grid = t.einsum('ti,tj -> ij', gx, gy)
 
     # hack normalization. 
-    grid /= t.sum(grid)
-
+    grid = self.normalize(grid)
     return grid
-
-
-class KLLoss(nn.Module):
-  """Calculate a KL Divergence grid-based loss"""
-  def __init__(self):
-    super(KLLoss, self).__init__()
-
-  def forward(self, grid, target_grid):
-    lg = grid.log()
-    lt = target_grid.log()
-    return t.sum(target_grid * (lt - lg))
 
 
 class BezierModel(nn.Module):
   """The Generative model.  Produces the Gaussian Mixture for a rendered
   Bezier Curve"""
 
-  def __init__(self, num_points, T, nx, ny, sigma, dark_threshold, steps):
+  def __init__(self, num_points, T, nx, ny, sigma, steps, report_every=1, print_callback=None):
     super(BezierModel, self).__init__()
     self.curve = BezierCurve(num_points, nx, ny, T)
-    self.pc = PrintCurve(nx, ny)
     self.mix = Mixture(nx, ny, sigma)
-    self.loss = KLLoss()
+    self.loss = nn.KLDivLoss()
     self.steps = steps
-    self.threshold = dark_threshold
+    self.report_every = report_every
     self.opt = optim.Adam([self.curve.points], lr=0)
+    self.print_fn = print_callback
     # self.opt = optim.SGD([self.curve.points], lr=self.eps)
 
-  def get_target(self, img_data):
-    """Gets the Gaussian Mixture from a rendered Bezier curve image data"""
-    dark_pixels = get_dark_pixels(img_data, self.threshold)
-    return self.mix(dark_pixels)
-
-  def save_target_image(self, img_data, path):
-    trg = Image.new(mode='L', size=img_data.shape)
-    mix = self.get_target(img_data)
-    mix *= 256 / t.max(mix) 
-    trg.putdata(mix.flatten().numpy())
-    trg.save(path)
+  def init_points(self):
+    self.curve.init_points()
 
   def forward(self):
     """Produce the data to be compared to the target"""
     curve = self.curve()
-    img_data = self.pc(curve)
-    dark_pixels = get_dark_pixels(img_data, self.threshold)
-    return self.mix(dark_pixels)
+    mixture = self.mix(curve)
+    return mixture
 
-  def infer(self, img_data):
+  def infer(self, target_img_data):
     """Does gradient descent on the points in the curve"""
-
-    target_mixture = self.get_target(img_data)
     self.curve.init_points()
-
-    schedule = {0: 1e-4, 30000: 1e-5, 50000: 2e-6}
-
-    pc = PrintCurve(self.mix.nx, self.mix.ny)
+    schedule = {0: 1e-2, 30000: 1e-5, 50000: 2e-6}
+    target_img_data = self.mix.normalize(target_img_data)
 
     for step in range(self.steps):
       if step in schedule:
@@ -196,46 +130,62 @@ class BezierModel(nn.Module):
 
       self.opt.zero_grad()
       current_mixture = self() # weird, but true
-      l = self.loss(current_mixture, target_mixture)
+      l = self.loss(current_mixture.log(), target_img_data)
       l.backward()
       self.opt.step()
-      if step % 100 == 0:
+      if step % self.report_every == 0:
         print(f'{step}: lr: {lr} {l}\t\tpoints:{self.curve.points.flatten()}')
+        if self.print_fn:
+          self.print_fn(current_mixture, step)
 
     return self.curve.points
 
-def get_dark_pixels(img, threshold):
-  """Return an array of normalized pixel coordinates with
-  value above a threshold"""
-  # img: nx,ny
-  idx = t.nonzero(t.where(img > threshold, img, t.zeros_like(img)) != 0)
-  cen = (idx.float() + 0.5) / (t.tensor(img.shape) + 1)
-  return cen
+
+def print_mixture(mixture, path):
+  """Print the mixture to an image file"""
+  img = Image.new(mode='L', size=mixture.shape)
+  mix_np = mixture.detach().numpy().flatten()
+  mix_np *= 256 / np.max(mix_np)
+  img.putdata(mix_np)
+  img.save(path)
 
 
 def main():
   t.set_printoptions(linewidth=150, precision=3)
-  if len(sys.argv) == 1:
-    print('Usage: gen_infer.py <img_dir> <target_file> <idx> <num_points> <sigma> <steps>')
+  if len(sys.argv) != 8:
+    print('Usage: gen_infer.py <img_dir> <target_file> <idx> '
+    '<num_bezier_points> <sigma> <report_every> <steps>')
     raise SystemExit(0)
 
-  img_dir, target_file, idx, num_points, sigma, steps = sys.argv[1:]
+  img_dir, target_file, idx, num_points, sigma, report_every, steps = sys.argv[1:]
+  print(f'img_dir: {img_dir}\n'
+      f'target_file: {target_file}\n'
+      f'idx: {idx}\n'
+      f'num_bezier_points: {num_points}\n'
+      f'sigma: {sigma}\n'
+      f'report_every: {report_every}\n'
+      f'steps: {steps}\n'
+      )
+
   idx = int(idx)
   num_points = int(num_points)
   sigma = float(sigma)
   steps = int(steps)
+  report_every = int(report_every)
+
+  def print_fn(img_data, step):
+    print_mixture(img_data, f'{img_dir}/{idx}.s{step:05}.png')
 
   target_points = np.load(f'{img_dir}/{target_file}')
   img_path = f'{img_dir}/d{idx}.png'
-  trg_path = f'{img_dir}/d{idx}.trg.png'
 
   img = Image.open(img_path).convert(mode='L')
   img_data = t.from_numpy(np.array(img, dtype=np.float32))
-  img_data.cuda()
   nx, ny = img_data.shape
-  model = BezierModel(num_points, 100, nx, ny, sigma, 200, steps)
+  model = BezierModel(num_points, 100, nx, ny, sigma, steps, report_every,
+      print_fn)
   model.cuda()
-  model.save_target_image(img_data, trg_path)
+  img_data.cuda()
 
   points = model.infer(img_data)
   print('inferred: ', points)
@@ -244,8 +194,4 @@ def main():
 
 if __name__ == '__main__':
   main()
-
-
-  
-
 
