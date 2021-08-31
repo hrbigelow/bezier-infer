@@ -23,6 +23,7 @@ import numpy as np
 from torch import nn, optim
 from math import factorial as fac
 from PIL import Image
+import math
 
 # Uses Bernstein Polynomial Form
 # b_{v,n}(t) := (n-choose-v) t^v (1-t)^(n-v)
@@ -55,6 +56,10 @@ class BezierCurve(nn.Module):
       self.points[:,0] *= self.nx
       self.points[:,1] *= self.ny
 
+  def set_points(self, points):
+    with t.no_grad():
+      self.points[:] = points
+
   def forward(self):
     # T,n 
     curve = self.bernstein @ self.points
@@ -67,14 +72,19 @@ class Mixture(nn.Module):
     super(Mixture, self).__init__()
     self.nx = nx
     self.ny = ny
-    self.sigma = sigma
+    self.sigma = t.tensor(sigma, requires_grad=True)
 
   def normalize(self, mixture):
     return mixture / t.sum(mixture)
 
+  def init_sigma(self, sigma):
+    with t.no_grad():
+      self.sigma.fill_(sigma)
+
   def forward(self, curve):
     """Output the mixture grid from the Bezier points
     curve: T,2
+    output: T,T
     """
     T = curve.shape[0]
     xp = t.linspace(0.5, self.nx - 0.5, self.nx).unsqueeze(0)
@@ -86,10 +96,39 @@ class Mixture(nn.Module):
     gx = (- rsig * (xp - bx) ** 2).exp()
     gy = (- rsig * (yp - by) ** 2).exp()
     grid = t.einsum('ti,tj -> ij', gx, gy)
+    # if grid.requires_grad:
+      # grid.register_hook(lambda grad: print('Mixture backward: grid.grad: \n',
+        # grad))
 
     # hack normalization. 
+    # print('Mixture: forward(): grid: \n', grid)
     grid = self.normalize(grid)
+    # print('Mixture: forward(): grid (normalized): \n', grid)
     return grid
+
+class CrossEntropy(t.autograd.Function):
+  @staticmethod
+  def forward(ctx, p, q):
+    lq = q.log()
+    ctx.save_for_backward(p, q, lq)
+    terms = t.where(p > 0.0, - p * lq, p) 
+    return terms.sum()
+
+  @staticmethod
+  def backward(ctx, grad_output):
+    p, q, lq = ctx.saved_tensors
+    p_grad = t.where(p > 0.0, - lq * grad_output, grad_output)
+    q_grad = t.where(p > 0.0, - grad_output * p / q, t.zeros_like(q))
+    return p_grad, q_grad
+
+
+
+class KLDivLoss(nn.Module):
+  def __init__(self):
+    super(KLDivLoss, self).__init__()
+
+  def forward(self, p, q):
+    return CrossEntropy.apply(p, q) 
 
 
 class BezierModel(nn.Module):
@@ -100,15 +139,26 @@ class BezierModel(nn.Module):
     super(BezierModel, self).__init__()
     self.curve = BezierCurve(num_points, nx, ny, T)
     self.mix = Mixture(nx, ny, sigma)
-    self.loss = nn.KLDivLoss()
+    # self.loss = nn.KLDivLoss()
+    self.kldivloss = KLDivLoss()
     self.steps = steps
     self.report_every = report_every
-    self.opt = optim.Adam([self.curve.points], lr=0)
+    param_groups = [
+        { 'params': self.mix.sigma },
+        { 'params': self.curve.points }
+        ]
+    self.opt = optim.Adam(param_groups, lr=0)
     self.print_fn = print_callback
     # self.opt = optim.SGD([self.curve.points], lr=self.eps)
 
   def init_points(self):
     self.curve.init_points()
+
+  def set_points(self, points):
+    self.curve.set_points(points)
+
+  def init_sigma(self, sigma):
+    self.mix.init_sigma(sigma)
 
   def forward(self):
     """Produce the data to be compared to the target"""
@@ -116,25 +166,52 @@ class BezierModel(nn.Module):
     mixture = self.mix(curve)
     return mixture
 
-  def infer(self, target_img_data):
+  def infer(self, trg_dist):
     """Does gradient descent on the points in the curve"""
-    self.curve.init_points()
-    schedule = {0: 1e-2, 30000: 1e-5, 50000: 2e-6}
-    target_img_data = self.mix.normalize(target_img_data)
+    points_sched = {0: 1e-2, 30000: 1e-5, 50000: 2e-6}
+    sigma_sched = {0: 1e-3, 10000: 5e-4, 20000: 2e-4, 50000: 1e-4 }
+    # sigma_sched = {0: 1e-2 }
+    trg_dist = self.mix.normalize(trg_dist)
+    trg_dist_log = t.where(trg_dist > 0.0, trg_dist.log(), t.zeros_like(trg_dist))
+    trg_h = - (trg_dist * trg_dist_log).sum()
 
     for step in range(self.steps):
-      if step in schedule:
-        lr = schedule[step]
-        for g in self.opt.param_groups:
-          g['lr'] = lr
+      if step in sigma_sched:
+        self.opt.param_groups[0]['lr'] = sigma_sched[step]
+      if step in points_sched:
+        self.opt.param_groups[1]['lr'] = points_sched[step]
 
       self.opt.zero_grad()
+      if math.isnan(self.mix.sigma.item()):
+        assert False
+
       current_mixture = self() # weird, but true
-      l = self.loss(current_mixture.log(), target_img_data)
+
+      if math.isnan(t.min(current_mixture)):
+        assert False
+
+      # print(current_mixture)
+      # print(trg_dist)
+      l = self.kldivloss(trg_dist, current_mixture)
+      if math.isnan(l.item()):
+        assert False
+
       l.backward()
       self.opt.step()
+
+      if math.isnan(self.mix.sigma.item()):
+        assert False
+
       if step % self.report_every == 0:
-        print(f'{step}: lr: {lr} {l}\t\tpoints:{self.curve.points.flatten()}')
+        sigma_lr = self.opt.param_groups[0]['lr']
+        points_lr = self.opt.param_groups[1]['lr']
+        kldiv = l - trg_h 
+        print(
+            f'Step: {step}:'
+            f'points_lr: {points_lr:3.3}\t'
+            f'\tsigma_lr: {sigma_lr:3.3}'
+            f'\tKLDiv: {kldiv:3.3}\tsigma:{self.mix.sigma:3.6}\tpoints:{self.curve.points.flatten()}'
+            )
         if self.print_fn:
           self.print_fn(current_mixture, step)
 
@@ -182,10 +259,24 @@ def main():
   img = Image.open(img_path).convert(mode='L')
   img_data = t.from_numpy(np.array(img, dtype=np.float32))
   nx, ny = img_data.shape
-  model = BezierModel(num_points, 100, nx, ny, sigma, steps, report_every,
-      print_fn)
+  T = 100 
+  model = BezierModel(num_points, T, nx, ny, sigma, steps, report_every, print_fn)
+  model.init_points()
   model.cuda()
   img_data.cuda()
+
+  # Experimental
+  """
+  prev_sigma = model.mix.sigma.item()
+  model.set_points(t.tensor([5.0, 5.0]))
+  model.init_sigma(0.1)
+  with t.no_grad():
+    img_data = model()
+  model.init_sigma(prev_sigma)
+  """
+
+  print_mixture(img_data, f'{img_dir}/{idx}.sanity.png')
+  print('image bezier points: ', model.curve.points.flatten())
 
   points = model.infer(img_data)
   print('inferred: ', points)
