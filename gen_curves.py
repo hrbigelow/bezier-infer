@@ -6,13 +6,13 @@ import sys
 
 
 if __name__ == '__main__':
-  if len(sys.argv) != 7:
+  if len(sys.argv) != 8:
     print('Usage: gen_curves.py <out_dir> <num_data> <num_bezier_points> '
-        '<x-pixels> <y-pixels> <sigma>')
+        '<x-pixels> <y-pixels> <sigma> <T>')
     raise SystemExit(0)
     
-  out_dir, N, P, nx, ny, sigma = sys.argv[1:]
-  N, P, nx, ny, T = int(N), int(P), int(nx), int(ny), 100
+  out_dir, N, P, nx, ny, sigma, T = sys.argv[1:]
+  N, P, nx, ny, T = int(N), int(P), int(nx), int(ny), int(T) 
   sigma = float(sigma)
 
   points = t.empty(N, P, 2)

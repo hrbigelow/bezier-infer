@@ -169,7 +169,7 @@ class BezierModel(nn.Module):
   def infer(self, trg_dist):
     """Does gradient descent on the points in the curve"""
     points_sched = {0: 1e-2, 30000: 1e-5, 50000: 2e-6}
-    sigma_sched = {0: 1e-3, 10000: 5e-4, 20000: 2e-4, 50000: 1e-4 }
+    sigma_sched = {0: 1e-3, 20000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
     # sigma_sched = {0: 1e-2 }
     trg_dist = self.mix.normalize(trg_dist)
     trg_dist_log = t.where(trg_dist > 0.0, trg_dist.log(), t.zeros_like(trg_dist))
@@ -207,10 +207,12 @@ class BezierModel(nn.Module):
         points_lr = self.opt.param_groups[1]['lr']
         kldiv = l - trg_h 
         print(
-            f'Step: {step}:'
-            f'points_lr: {points_lr:3.3}\t'
+            f'Step: {step}'
+            f'\tpoints_lr: {points_lr:3.3}\t'
             f'\tsigma_lr: {sigma_lr:3.3}'
-            f'\tKLDiv: {kldiv:3.3}\tsigma:{self.mix.sigma:3.6}\tpoints:{self.curve.points.flatten()}'
+            f'\tKLDiv: {kldiv:3.3}'
+            f'\tsigma:{self.mix.sigma:3.6}'
+            # f'\tpoints:{self.curve.points.flatten()}'
             )
         if self.print_fn:
           self.print_fn(current_mixture, step)
