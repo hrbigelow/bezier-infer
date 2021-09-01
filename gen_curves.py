@@ -3,6 +3,7 @@ import torch as t
 import gen_infer as gi
 import matplotlib.pyplot as plt
 import sys
+import os
 
 
 if __name__ == '__main__':
@@ -14,6 +15,9 @@ if __name__ == '__main__':
   out_dir, N, P, nx, ny, sigma, T = sys.argv[1:]
   N, P, nx, ny, T = int(N), int(P), int(nx), int(ny), int(T) 
   sigma = float(sigma)
+
+  if not os.path.exists(out_dir):
+    os.mkdir(out_dir)
 
   points = t.empty(N, P, 2)
   bmod = gi.BezierModel(P, T, nx, ny, sigma, 0)

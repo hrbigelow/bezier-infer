@@ -24,6 +24,7 @@ from torch import nn, optim
 from math import factorial as fac
 from PIL import Image
 import math
+import cv2
 
 # Uses Bernstein Polynomial Form
 # b_{v,n}(t) := (n-choose-v) t^v (1-t)^(n-v)
@@ -34,48 +35,66 @@ import math
 
 class BezierCurve(nn.Module):
   """Calculate the evaluation points of a Bezier"""
-  def __init__(self, num_points, nx, ny, T):
+  def __init__(self, B, P, nx, ny, T):
     super(BezierCurve, self).__init__()
-    self.num_points = num_points
+    self.P = P
     self.T = T
-    self.points = t.empty((self.num_points, 2), requires_grad=True)
+    self.points = t.empty((B, P, 2), requires_grad=True)
     self.nx = nx
     self.ny = ny
-    n = num_points
-    deg = num_points - 1
-    poly_coeff = t.tensor([fac(deg) / (fac(v) * fac(deg-v)) for v in range(n)])
-    vs = t.arange(n)
-    ls = t.linspace(0, 1, T).unsqueeze(1)
+    deg = P - 1
+    self.coeff = t.tensor([fac(deg) / (fac(v) * fac(deg-v)) for v in range(P)])
+    # vs = t.arange(P)
+    self.ls = t.empty((B, T), requires_grad=True)
+    # self.ls = t.linspace(0, 1, T).unsqueeze(1)
 
     # bernstein: T,n 
-    self.bernstein = poly_coeff * ls**vs * (1.0-ls)**(deg-vs)
+    # self.bernstein = coeff * ls**vs * (1.0-ls)**(deg-vs)
 
   def init_points(self):
     nn.init.uniform_(self.points, a=0.0, b=1.0)
     with t.no_grad():
-      self.points[:,0] *= self.nx
-      self.points[:,1] *= self.ny
+      self.points[...,0] *= self.nx
+      self.points[...,1] *= self.ny
+      self.ls[:] = t.linspace(0, 1, self.T)
 
   def set_points(self, points):
     with t.no_grad():
       self.points[:] = points
 
   def forward(self):
-    # T,n 
+    # bernstein: T,P   points: B,P,2 
+    # curve: B,T,2
+    vs = t.arange(self.P)
+    deg = self.P - 1
+    self.bernstein = (self.coeff 
+            * self.ls.unsqueeze(2) ** vs 
+            * (1.0 - self.ls.unsqueeze(2)) ** (deg - vs)
+            )
     curve = self.bernstein @ self.points
     return curve
 
 
 class Mixture(nn.Module):
   """Output a pixellated Gaussian mixture from a curve"""
-  def __init__(self, nx, ny, sigma):
+  def __init__(self, B, nx, ny, sigma):
     super(Mixture, self).__init__()
     self.nx = nx
     self.ny = ny
-    self.sigma = t.tensor(sigma, requires_grad=True)
+    self.sigma = t.full((B,), sigma, requires_grad=True)
+
+  def rectify(self, mixture):
+    max_vals = 1.0 / (2.0 * self.sigma ** 2)
+    rect = t.min(mixture, max_vals.view(-1, 1, 1))
+    return rect
 
   def normalize(self, mixture):
-    return mixture / t.sum(mixture)
+    return mixture / t.sum(mixture, dim=(1,2), keepdim=True)
+
+  def process(self, mixture):
+    # mixture = self.rectify(mixture)
+    mixture = self.normalize(mixture)
+    return mixture
 
   def init_sigma(self, sigma):
     with t.no_grad():
@@ -83,27 +102,21 @@ class Mixture(nn.Module):
 
   def forward(self, curve):
     """Output the mixture grid from the Bezier points
-    curve: T,2
-    output: T,T
+    curve: B,T,2
+    output: B,T,T
     """
-    T = curve.shape[0]
+    T = curve.shape[1]
     xp = t.linspace(0.5, self.nx - 0.5, self.nx).unsqueeze(0)
     yp = t.linspace(0.5, self.ny - 0.5, self.ny).unsqueeze(0)
-    bx = curve[:,0].unsqueeze(1)
-    by = curve[:,1].unsqueeze(1)
-    rsig = 1.0 / (2.0 * self.sigma ** 2)
+    bx = curve[...,0].unsqueeze(2)
+    by = curve[...,1].unsqueeze(2)
+    rsig = (1.0 / (2.0 * self.sigma ** 2)).view(-1, 1, 1)
     # gx: T,nx   gy: T,ny
+    # xp - bx: B,T,nx,   yp - by: B,T,ny
     gx = (- rsig * (xp - bx) ** 2).exp()
     gy = (- rsig * (yp - by) ** 2).exp()
-    grid = t.einsum('ti,tj -> ij', gx, gy)
-    # if grid.requires_grad:
-      # grid.register_hook(lambda grad: print('Mixture backward: grid.grad: \n',
-        # grad))
-
-    # hack normalization. 
-    # print('Mixture: forward(): grid: \n', grid)
-    grid = self.normalize(grid)
-    # print('Mixture: forward(): grid (normalized): \n', grid)
+    grid = t.einsum('btx,bty -> bxy', gx, gy)
+    grid = self.process(grid)
     return grid
 
 class CrossEntropy(t.autograd.Function):
@@ -112,15 +125,15 @@ class CrossEntropy(t.autograd.Function):
     lq = q.log()
     ctx.save_for_backward(p, q, lq)
     terms = t.where(p > 0.0, - p * lq, p) 
-    return terms.sum()
+    return terms.sum(dim=tuple(range(1, terms.ndim)))
 
   @staticmethod
   def backward(ctx, grad_output):
     p, q, lq = ctx.saved_tensors
-    p_grad = t.where(p > 0.0, - lq * grad_output, grad_output)
-    q_grad = t.where(p > 0.0, - grad_output * p / q, t.zeros_like(q))
+    go = grad_output.view(-1, 1, 1)
+    p_grad = t.where(p > 0.0, - lq * go, go)
+    q_grad = t.where(p > 0.0, - go * p / q, t.zeros_like(q))
     return p_grad, q_grad
-
 
 
 class KLDivLoss(nn.Module):
@@ -135,21 +148,15 @@ class BezierModel(nn.Module):
   """The Generative model.  Produces the Gaussian Mixture for a rendered
   Bezier Curve"""
 
-  def __init__(self, num_points, T, nx, ny, sigma, steps, report_every=1, print_callback=None):
+  def __init__(self, P, B, T, nx, ny, sigma, steps, report_every=1, print_callback=None):
     super(BezierModel, self).__init__()
-    self.curve = BezierCurve(num_points, nx, ny, T)
-    self.mix = Mixture(nx, ny, sigma)
-    # self.loss = nn.KLDivLoss()
+    self.curve = BezierCurve(B, P, nx, ny, T)
+    self.mix = Mixture(B, nx, ny, sigma)
     self.kldivloss = KLDivLoss()
     self.steps = steps
     self.report_every = report_every
-    param_groups = [
-        { 'params': self.mix.sigma },
-        { 'params': self.curve.points }
-        ]
-    self.opt = optim.Adam(param_groups, lr=0)
     self.print_fn = print_callback
-    # self.opt = optim.SGD([self.curve.points], lr=self.eps)
+    self.pgmap = { 'points': 0, 'sigma': 1, 'ls': 2 }
 
   def init_points(self):
     self.curve.init_points()
@@ -160,6 +167,23 @@ class BezierModel(nn.Module):
   def init_sigma(self, sigma):
     self.mix.init_sigma(sigma)
 
+  def cuda(self):
+    super(BezierModel, self).cuda()
+    param_groups = [
+        { 'params': self.mix.sigma },
+        { 'params': self.curve.points },
+        { 'params': self.curve.ls }
+        ]
+    self.opt = optim.Adam(param_groups, lr=0.0)
+    # self.opt = optim.SGD(param_groups, lr=0.0, momentum=0.8)
+
+  def set_lr(self, group, lr):
+    self.opt.param_groups[self.pgmap[group]]['lr'] = lr
+
+  def get_lr(self, group):
+    return self.opt.param_groups[self.pgmap[group]]['lr']
+
+
   def forward(self):
     """Produce the data to be compared to the target"""
     curve = self.curve()
@@ -168,54 +192,50 @@ class BezierModel(nn.Module):
 
   def infer(self, trg_dist):
     """Does gradient descent on the points in the curve"""
-    points_sched = {0: 1e-2, 30000: 1e-5, 50000: 2e-6}
-    sigma_sched = {0: 1e-3, 20000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
+    sched = {}
+    sched['points'] = {0: 1e-2, 30000: 1e-4, 50000: 2e-6}
+    sched['sigma'] = {0: 1e-3, 30000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
+    sched['ls'] = {0: 1e-6}
+
     # sigma_sched = {0: 1e-2 }
-    trg_dist = self.mix.normalize(trg_dist)
+    with t.no_grad():
+      trg_dist = self.mix.process(trg_dist)
     trg_dist_log = t.where(trg_dist > 0.0, trg_dist.log(), t.zeros_like(trg_dist))
-    trg_h = - (trg_dist * trg_dist_log).sum()
+    trg_h = - (trg_dist * trg_dist_log).sum(dim=(1,2))
 
     for step in range(self.steps):
-      if step in sigma_sched:
-        self.opt.param_groups[0]['lr'] = sigma_sched[step]
-      if step in points_sched:
-        self.opt.param_groups[1]['lr'] = points_sched[step]
 
       self.opt.zero_grad()
-      if math.isnan(self.mix.sigma.item()):
-        assert False
+      for k, v in self.pgmap.items():
+        if step in sched[k]:
+          self.set_lr(k, sched[k][step])
 
       current_mixture = self() # weird, but true
-
-      if math.isnan(t.min(current_mixture)):
-        assert False
-
-      # print(current_mixture)
-      # print(trg_dist)
       l = self.kldivloss(trg_dist, current_mixture)
-      if math.isnan(l.item()):
-        assert False
-
-      l.backward()
+      l.sum().backward()
       self.opt.step()
-
-      if math.isnan(self.mix.sigma.item()):
-        assert False
+      """
+      """
+      # Learning rate scheduling should be applied *after* optimizer's update
+      # see https://pytorch.org/docs/stable/optim.html 'How to adjust Learning
+      # Rate'
 
       if step % self.report_every == 0:
-        sigma_lr = self.opt.param_groups[0]['lr']
-        points_lr = self.opt.param_groups[1]['lr']
+        # print(f'Step: {step}')
+        sigma_lr = self.get_lr('sigma')
+        points_lr = self.get_lr('points')
         kldiv = l - trg_h 
         print(
             f'Step: {step}'
-            f'\tpoints_lr: {points_lr:3.3}\t'
+            f'\tpoints_lr: {points_lr:3.3}'
             f'\tsigma_lr: {sigma_lr:3.3}'
-            f'\tKLDiv: {kldiv:3.3}'
-            f'\tsigma:{self.mix.sigma:3.6}'
+            f'\tKLDiv: {kldiv.min():3.3}'
+            f'\tmin_sigma:{self.mix.sigma.min():3.6}'
+            f'\tls:{self.curve.ls[0,0:10]}'
             # f'\tpoints:{self.curve.points.flatten()}'
             )
         if self.print_fn:
-          self.print_fn(current_mixture, step)
+          self.print_fn(current_mixture)
 
     return self.curve.points
 
@@ -231,16 +251,18 @@ def print_mixture(mixture, path):
 
 def main():
   t.set_printoptions(linewidth=150, precision=3)
-  if len(sys.argv) != 8:
+  if len(sys.argv) != 10:
     print('Usage: gen_infer.py <img_dir> <target_file> <idx> '
-    '<num_bezier_points> <sigma> <report_every> <steps>')
+    '<num_bezier_points> <B> <T> <sigma> <report_every> <steps>')
     raise SystemExit(0)
 
-  img_dir, target_file, idx, num_points, sigma, report_every, steps = sys.argv[1:]
+  img_dir, target_file, idx, num_points, B, T, sigma, report_every, steps = sys.argv[1:]
   print(f'img_dir: {img_dir}\n'
       f'target_file: {target_file}\n'
       f'idx: {idx}\n'
       f'num_bezier_points: {num_points}\n'
+      f'B: {B}\n'
+      f'T: {T}\n'
       f'sigma: {sigma}\n'
       f'report_every: {report_every}\n'
       f'steps: {steps}\n'
@@ -248,12 +270,11 @@ def main():
 
   idx = int(idx)
   num_points = int(num_points)
+  T = int(T)
+  B = int(B)
   sigma = float(sigma)
   steps = int(steps)
   report_every = int(report_every)
-
-  def print_fn(img_data, step):
-    print_mixture(img_data, f'{img_dir}/{idx}.s{step:05}.png')
 
   target_points = np.load(f'{img_dir}/{target_file}')
   img_path = f'{img_dir}/d{idx}.png'
@@ -261,8 +282,19 @@ def main():
   img = Image.open(img_path).convert(mode='L')
   img_data = t.from_numpy(np.array(img, dtype=np.float32))
   nx, ny = img_data.shape
-  T = 100 
-  model = BezierModel(num_points, T, nx, ny, sigma, steps, report_every, print_fn)
+
+  fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+  vwriter = cv2.VideoWriter(f'{img_dir}/{idx}.avi', fourcc, 20, (nx*B, ny))
+  def print_fn(img_data):
+    # img_data: B,nx,ny
+    d = img_data.detach().numpy()
+    d *= 255.0 / np.max(d, axis=(1,2), keepdims=True)
+    d = np.concatenate([d[i] for i in range(d.shape[0])], axis=1)
+    d = np.tile(np.expand_dims(d, 2), 3).astype(np.uint8)
+    vwriter.write(d)
+
+  model = BezierModel(num_points, B, T, nx, ny, sigma, steps, report_every, print_fn)
+  # model = BezierModel(num_points, B, T, nx, ny, sigma, steps, report_every, None)
   model.init_points()
   model.cuda()
   img_data.cuda()
@@ -277,12 +309,16 @@ def main():
   model.init_sigma(prev_sigma)
   """
 
-  print_mixture(img_data, f'{img_dir}/{idx}.sanity.png')
-  print('image bezier points: ', model.curve.points.flatten())
+  # print_mixture(img_data, f'{img_dir}/{idx}.sanity.png')
+  # print('image bezier points: ', model.curve.points.flatten())
 
-  points = model.infer(img_data)
+  points = model.infer(img_data.unsqueeze(0).repeat(B, 1, 1))
+  vwriter.release()
+
   print('inferred: ', points)
   print('target: ', target_points[idx].flatten())
+
+  # cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
