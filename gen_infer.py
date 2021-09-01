@@ -193,8 +193,8 @@ class BezierModel(nn.Module):
   def infer(self, trg_dist):
     """Does gradient descent on the points in the curve"""
     sched = {}
-    sched['points'] = {0: 1e-2, 30000: 1e-4, 50000: 2e-6}
-    sched['sigma'] = {0: 1e-3, 30000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
+    sched['points'] = {0: 0.0, 30000: 1e-2, 40000: 1e-4, 50000: 2e-6}
+    sched['sigma'] = {0: 5e-3, 30000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
     sched['ls'] = {0: 1e-6}
 
     # sigma_sched = {0: 1e-2 }
