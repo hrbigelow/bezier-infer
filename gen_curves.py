@@ -13,6 +13,17 @@ if __name__ == '__main__':
     raise SystemExit(0)
     
   out_dir, N, P, nx, ny, sigma, T = sys.argv[1:]
+
+  print(
+      f'out_dir: {out_dir}\n'
+      f'num_data: {N}\n'
+      f'P: {P}\n'
+      f'nx: {nx}\n'
+      f'ny: {ny}\n'
+      f'sigma: {sigma}\n'
+      f'T: {T}\n'
+      )
+
   N, P, nx, ny, T = int(N), int(P), int(nx), int(ny), int(T) 
   sigma = float(sigma)
 
@@ -20,13 +31,19 @@ if __name__ == '__main__':
     os.mkdir(out_dir)
 
   points = t.empty(N, P, 2)
-  bmod = gi.BezierModel(P, T, nx, ny, sigma, 0)
+  bmod = gi.BezierModel(P, 10, T, nx, ny, sigma, 0, 0, 0, None)
 
-  for i in range(N):
+  i = 0
+  while i != N:
     bmod.init_points()
-    points[i] = bmod.curve.points
-    mix = bmod()
-    gi.print_mixture(mix, f'{out_dir}/d{i}.png')
+    with t.no_grad():
+      mix = bmod()
+    for j in range(mix.shape[0]):
+      gi.print_mixture(mix[j], f'{out_dir}/d{i}.png')
+      points[i] = bmod.curve.points[j]
+      i += 1
+      if i == N:
+        break
 
   
   html_file = f'{out_dir}/images.html'
