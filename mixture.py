@@ -3,11 +3,12 @@ from torch import nn
 
 class Mixture(nn.Module):
   """Output a pixellated Gaussian mixture from a curve"""
-  def __init__(self, B, nx, ny, sigma):
+  def __init__(self, B, P, nx, ny, sigma):
     super(Mixture, self).__init__()
     self.nx = nx
     self.ny = ny
-    self.sigma = t.full((B,), sigma, requires_grad=True)
+    self.P = P
+    self.sigma = t.full((B, P), sigma, requires_grad=True)
 
   def rectify(self, mixture):
     max_vals = 1.0 / (2.0 * self.sigma ** 2)
@@ -15,7 +16,9 @@ class Mixture(nn.Module):
     return rect
 
   def normalize(self, mixture):
-    return mixture / t.sum(mixture, dim=(1,2), keepdim=True)
+    # with t.no_grad():
+    z = t.sum(mixture, dim=(1,2), keepdim=True)
+    return mixture / z;
 
   def process(self, mixture):
     # mixture = self.rectify(mixture)
@@ -37,11 +40,10 @@ class Mixture(nn.Module):
     yp = t.linspace(0.5, self.ny - 0.5, self.ny).unsqueeze(0)
     bx = curve[...,0:1]
     by = curve[...,1:2]
-    rsig = (1.0 / (2.0 * self.sigma ** 2)).view(-1, 1, 1)
     # gx: T,nx   gy: T,ny
     # xp - bx: B,T,nx,   yp - by: B,T,ny
-    gx = (- rsig * (xp - bx) ** 2).exp()
-    gy = (- rsig * (yp - by) ** 2).exp()
+    gx = (- 0.5 * ((xp - bx) / self.sigma.unsqueeze(2)) ** 2).exp()
+    gy = (- 0.5 * ((yp - by) / self.sigma.unsqueeze(2)) ** 2).exp()
     grid = t.einsum('btx,bty -> bxy', gx, gy)
     grid = self.process(grid)
     return grid

@@ -13,7 +13,7 @@ class BezierModel(nn.Module):
     super(BezierModel, self).__init__()
     self.curve = curve.BezierCurve(B, P, nx, ny, T)
     self.scatter = scatter.Scatter(B, P, nx, ny)
-    self.mix = mixture.Mixture(B, nx, ny, sigma)
+    self.mix = mixture.Mixture(B, P, nx, ny, sigma)
     self.kldivloss = xent.KLDivLoss()
     self.steps = steps
     self.report_every = report_every
@@ -22,7 +22,7 @@ class BezierModel(nn.Module):
     self.pgmap = { 'points': 0, 'sigma': 1 }
  
   def init_points(self):
-    self.curve.init_points()
+    # self.curve.init_points()
     self.scatter.init_points()
 
   def set_points(self, points):
@@ -61,8 +61,8 @@ class BezierModel(nn.Module):
   def infer(self, trg_dist):
     """Does gradient descent on the points in the curve"""
     sched = {}
-    sched['points'] = {0: 1e-2, 30000: 1e-3, 40000: 1e-4, 50000: 2e-6}
-    sched['sigma'] = {0: 5e-3, 30000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
+    sched['points'] = {0: 1e-1, 30000: 1e-3, 40000: 1e-4, 50000: 2e-6}
+    sched['sigma'] = {0: 1e-1, 30000: 5e-4, 40000: 3e-4, 50000: 1e-4 }
 
     with t.no_grad():
       trg_dist = self.mix.process(trg_dist)
@@ -93,12 +93,13 @@ class BezierModel(nn.Module):
         points_lr = self.get_lr('points')
         kldiv = l - trg_h 
         print(
-            f'Step: {step}'
+            f'Step: {step} (of {self.steps})'
             f'\tindex: {self.sample_idx}'
             f'\tpoints_lr: {points_lr:3.3}'
             f'\tsigma_lr: {sigma_lr:3.3}'
             f'\tmin KLDiv: {kldiv.min():3.3}'
             f'\tmin_sigma:{self.mix.sigma.min():3.6}'
+            f'\tmax_sigma:{self.mix.sigma.max():3.6}'
             # f'\tpoints:{self.curve.points.flatten()}'
             )
         if self.print_fn:

@@ -18,6 +18,7 @@
 # and gradient descent on P is performed until convergence
 """
 import sys
+import os
 import torch as t
 import numpy as np
 from PIL import Image
@@ -39,14 +40,13 @@ def print_mixture(mixture, path):
 
 def main():
   t.set_printoptions(linewidth=150, precision=3)
-  if len(sys.argv) != 10:
-    print('Usage: gen_infer.py <img_dir> <target_file> <idx> '
+  if len(sys.argv) != 9:
+    print('Usage: gen_infer.py <img_dir> <idx> '
     '<P> <B> <T> <sigma> <report_every> <steps>')
     raise SystemExit(0)
 
-  img_dir, target_file, idx, P, B, T, sigma, report_every, steps = sys.argv[1:]
+  img_dir, idx, P, B, T, sigma, report_every, steps = sys.argv[1:]
   print(f'img_dir: {img_dir}\n'
-      f'target_file: {target_file}\n'
       f'idx: {idx}\n'
       f'P: {P}\n'
       f'B: {B}\n'
@@ -56,6 +56,7 @@ def main():
       f'steps: {steps}\n'
       )
 
+  rev = os.popen('git rev-parse --short HEAD').read().strip()
   idx = int(idx)
   P = int(P)
   T = int(T)
@@ -64,7 +65,6 @@ def main():
   steps = int(steps)
   report_every = int(report_every)
 
-  target_points = np.load(f'{img_dir}/{target_file}')
   img_path = f'{img_dir}/d{idx}.png'
 
   trg_img = Image.open(img_path).convert(mode='L')
@@ -75,7 +75,7 @@ def main():
   # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
   # vwriter = cv2.VideoWriter(f'{img_dir}/{idx}.mp4', fourcc, 20, (nx*B, ny))
   fourcc = cv2.VideoWriter_fourcc(*'FMP4')
-  vwriter = cv2.VideoWriter(f'{img_dir}/{idx}.avi', fourcc, 20, (nx*B, ny))
+  vwriter = cv2.VideoWriter(f'{img_dir}/sam{idx}.rev{rev}.P{P}.S{sigma}.avi', fourcc, 10, (nx*B, ny))
   
 
   def print_fn(img_data):
@@ -99,11 +99,6 @@ def main():
 
   points = model.infer(trg_img_data.unsqueeze(0).repeat(B, 1, 1))
   vwriter.release()
-
-  print('inferred: ', points)
-  print('target: ', target_points[idx].flatten())
-
-  # cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
