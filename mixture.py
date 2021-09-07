@@ -3,19 +3,23 @@ from torch import nn
 
 class Mixture(nn.Module):
   """Output a pixellated Gaussian mixture from a curve"""
-  def __init__(self, B, P, nx, ny, sigma):
+  def __init__(self, B, T, nx, ny, sigma, is_single_sigma=True):
     super(Mixture, self).__init__()
     self.nx = nx
     self.ny = ny
-    self.P = P
-    self.sigma = t.full((B, P), sigma, requires_grad=True)
+    if is_single_sigma:
+      self._sigma = t.full((B,), sigma, requires_grad=True)
+      self.sigma = self._sigma.view(-1, 1)
+    else:
+      self._sigma = t.full((B, T), sigma, requires_grad=True)
+      self.sigma = self._sigma
 
-  def rectify(self, mixture):
-    max_vals = 1.0 / (2.0 * self.sigma ** 2)
-    rect = t.min(mixture, max_vals.view(-1, 1, 1))
-    return rect
+  def params(self):
+    return self._sigma
 
   def normalize(self, mixture):
+    # using t.no_grad() prevents independent points from drifting offscreen.
+    # but then, the Q distribution starts to approach uniform
     # with t.no_grad():
     z = t.sum(mixture, dim=(1,2), keepdim=True)
     return mixture / z;

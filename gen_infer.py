@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image
 import math
 import cv2
-import bezier_model as bmod 
+import models
 
 
 def print_mixture(mixture, path):
@@ -40,12 +40,12 @@ def print_mixture(mixture, path):
 
 def main():
   t.set_printoptions(linewidth=150, precision=3)
-  if len(sys.argv) != 9:
+  if len(sys.argv) != 10:
     print('Usage: gen_infer.py <img_dir> <idx> '
-    '<P> <B> <T> <sigma> <report_every> <steps>')
+    '<P> <B> <T> <sigma> <report_every> <mode> <steps>')
     raise SystemExit(0)
 
-  img_dir, idx, P, B, T, sigma, report_every, steps = sys.argv[1:]
+  img_dir, idx, P, B, T, sigma, report_every, mode, steps = sys.argv[1:]
   print(f'img_dir: {img_dir}\n'
       f'idx: {idx}\n'
       f'P: {P}\n'
@@ -53,6 +53,7 @@ def main():
       f'T: {T}\n'
       f'sigma: {sigma}\n'
       f'report_every: {report_every}\n'
+      f'mode: {mode}\n'
       f'steps: {steps}\n'
       )
 
@@ -65,6 +66,8 @@ def main():
   steps = int(steps)
   report_every = int(report_every)
 
+  model_type, sigma_type = mode.split('-')
+
   img_path = f'{img_dir}/d{idx}.png'
 
   trg_img = Image.open(img_path).convert(mode='L')
@@ -72,32 +75,45 @@ def main():
   nx, ny = trg_img_data.shape
 
   # fourcc = -1
-  # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-  # vwriter = cv2.VideoWriter(f'{img_dir}/{idx}.mp4', fourcc, 20, (nx*B, ny))
-  fourcc = cv2.VideoWriter_fourcc(*'FMP4')
-  vwriter = cv2.VideoWriter(f'{img_dir}/sam{idx}.rev{rev}.P{P}.S{sigma}.avi', fourcc, 10, (nx*B, ny))
+  ext, code = 'mp4', 'mp4v'
+  ext, code = 'avi', 'FMP4'
+  fourcc = cv2.VideoWriter_fourcc(*code)
+  vpath = f'{img_dir}/s{idx}.r{rev}.T{T}.P{P}.S{sigma}.{mode}.{ext}'
+  vwriter = cv2.VideoWriter(vpath, fourcc, 10, (nx*B, ny))
   
+  def add_border(img_data):
+    # img_data: B,nx,ny,3
+    d[:,0,:,:] = 255
+    d[:,-1,:,:] = 255
+    d[:,:,0,:] = 255
+    d[:,:,-1,:] = 255
+
 
   def print_fn(img_data):
     # img_data: B,nx,ny
     d = img_data.detach().numpy()
     d *= 255.0 / np.max(d, axis=(1,2), keepdims=True)
-    d[:,0,:] = 255
-    d[:,-1,:] = 255
-    d[:,:,0] = 255
-    d[:,:,-1] = 255
-    d = np.tile(np.expand_dims(d, 3), 3) # convert to RGB
+    z = np.zeros_like(d)
+    ti = np.tile(trg_img_data, (d.shape[0], 1, 1))
+    d = np.stack([ti, d, z], axis=3) # convert to RGB
     d[...,1] = np.maximum(d[...,1], trg_img_data) # target is red channel
     d = np.concatenate([d[i] for i in range(d.shape[0])], axis=1)
     d = d.astype(np.uint8)
     vwriter.write(d)
 
-  model = bmod.BezierModel(P, B, T, nx, ny, sigma, steps, idx, report_every, print_fn)
-  model.init_points()
+  if model_type == 'bezier':
+    model = models.Bezier(P, B, T, nx, ny, sigma, sigma_type == 'single')
+  elif model_type == 'scatter':
+    model = models.MuScatter(B, T, nx, ny, sigma, sigma_type == 'single')
+  else:
+    raise RuntimeError('invalid mode: ', mode)
+
+  model.init()
   model.cuda()
   trg_img_data.cuda()
 
-  points = model.infer(trg_img_data.unsqueeze(0).repeat(B, 1, 1))
+  trg = trg_img_data.unsqueeze(0).repeat(B, 1, 1)
+  points = model.infer(trg, idx, steps, report_every, print_fn)
   vwriter.release()
 
 

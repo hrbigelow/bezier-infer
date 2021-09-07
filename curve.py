@@ -26,6 +26,9 @@ class BezierCurve(nn.Module):
     self.ls = t.linspace(0, 1, T).unsqueeze(0).repeat(B,1)
     self.init_poly()
 
+  def params(self):
+    return self.points
+
   def init_poly(self):
     # bernstein: T,P 
     vs = t.arange(self.P) # [0, P)
@@ -40,7 +43,7 @@ class BezierCurve(nn.Module):
 
     self.sub_bernstein = self.sub_coeff * lsu ** sub_vs * lsu_inv ** sub_vs_rev 
 
-  def init_points(self):
+  def init(self):
     nn.init.uniform_(self.points, a=0.0, b=1.0)
     self.ls[:] = t.linspace(0, 1, self.T)
     with t.no_grad():
@@ -56,7 +59,8 @@ class BezierCurve(nn.Module):
   def nudge_ls(self, reps):
     for _ in range(reps):
       with t.no_grad():
-        curve, _ = self.forward()
+        # curve, _ = self.forward()
+        curve = self.forward()
       diff = curve[:,1:,:] - curve[:,:-1,:] # B,T-1,2
       dist = t.einsum('bti, bti -> bt', diff, diff).sqrt()
       dif_dist = dist[:,1:] - dist[:,:-1] # B,T-2
@@ -73,8 +77,9 @@ class BezierCurve(nn.Module):
     # bernstein: T,P   points: B,P,2 
     # curve: B,T,2
     curve = self.bernstein @ self.points
-    with t.no_grad():
-      sub_points = self.P * (self.points[:,1:,:] - self.points[:,:-1,:])
-    curve_grad = self.sub_bernstein @ sub_points
-    return curve, curve_grad
+    # with t.no_grad():
+      # sub_points = self.P * (self.points[:,1:,:] - self.points[:,:-1,:])
+    # curve_grad = self.sub_bernstein @ sub_points
+    # return curve, curve_grad
+    return curve
 

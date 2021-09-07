@@ -2,21 +2,24 @@ import torch as t
 from torch import nn
 
 class Scatter(nn.Module):
-  def __init__(self, B, P, nx, ny):
+  def __init__(self, B, T, nx, ny):
     super(Scatter, self).__init__()
-    self.P = P
+    self.T = T
     self.nx = nx
     self.ny = ny
-    self.points = t.empty((B, P, 2), requires_grad=True)
+    self.mus = t.empty((B, T, 2), requires_grad=True)
 
-  def init_points(self):
-    nn.init.uniform_(self.points, a=0.0, b=1.0)
+  def params(self):
+    return self.mus
+
+  def init(self):
+    nn.init.uniform_(self.mus, a=0.0, b=1.0)
     with t.no_grad():
-      self.points[...,0] *= self.nx
-      self.points[...,1] *= self.ny
+      self.mus[...,0] *= self.nx
+      self.mus[...,1] *= self.ny
 
   def forward(self):
-    return self.points
+    return self.mus
 
 
 
